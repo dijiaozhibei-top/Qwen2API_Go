@@ -1,0 +1,69 @@
+# Qwen2API_Go deployment via Docker Compose
+#
+# Usage:
+#   1. cp .env.example .env        (or create .env; the compose file reads it)
+#   2. docker compose up -d        (build image, start service)
+#
+# Notes:
+#   - The image is multi-stage (Node builds public/out, Go compiles the binary).
+#   - ACCOUNTS / DATA_SAVE_MODE / REDIS_URL etc. all come from .env.
+#   - For DATA_SAVE_MODE=file, accounts persist to ./data/data.json (volume).
+#   - BROWSER_AUTH_ENABLED=true (default) needs a browser binary inside the
+#     container. The default image is alpine and does NOT bundle Chromium, so
+#     browser session warm-up will fail unless you use a chromium-enabled image
+#     or set BROWSER_AUTH_ENABLED=false. See CONFIGURATION.md.
+#   - Example with Redis persistence: set DATA_SAVE_MODE=redis and
+#     REDIS_URL=redis://redis:6379/0 in .env, then `docker compose up -d`.
+
+services:
+  qwen2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen2api_go:local
+    container_name: qwen2api
+    restart: unless-stopped
+    ports:
+      # Host port :3000 -> container :3000. Change the left side to expose a
+      # different host port, e.g. "8080:3000".
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Ensure the service listens on all interfaces inside the container so
+      # port mapping works. The .env may leave this blank.
+      LISTEN_ADDRESS: ${LISTEN_ADDRESS:-0.0.0.0}
+      SERVICE_PORT: ${SERVICE_PORT:-3000}
+      # Keep timezone data available (tzdata is installed in the image).
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      # Persistent account/conversation storage when DATA_SAVE_MODE=file.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:${SERVICE_PORT:-3000}/models >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Only start the Redis companion when the host asks for it. Uncomment to
+    # enable:
+    # depends_on:
+    #   - redis
+    networks:
+      - qwen2api
+
+  # Optional Redis for DATA_SAVE_MODE=redis. Enable by uncommenting the
+  # depends_on above, setting DATA_SAVE_MODE=redis and
+  # REDIS_URL=redis://redis:6379/0 in .env.
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: qwen2api-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./redis-data:/data
+  #   networks:
+  #     - qwen2api
+
+networks:
+  qwen2api:
+    driver: bridge
