@@ -52,7 +52,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -65,49 +65,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Prune old GHCR versions
-        env:
-          GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GHCR_PAT:-}" ]; then
-            echo "no GHCR_PAT set; skipping prune"
-            exit 0
-          fi
-          # Keep the version we just pushed (sha-<commit>) plus the latest marker.
-          KEEP="sha-${GITHUB_SHA:0:7}"
-          OWNER="${GITHUB_REPOSITORY_OWNER}"
-          IMG="${GITHUB_REPOSITORY#*/}"
-          IMG="${IMG,,}"
-          echo "owner=$OWNER img=$IMG keep_tag=$KEEP"
-          python3 - "$GHCR_PAT" "$OWNER" "$IMG" "$KEEP" <<'PY'
-          import sys, json, time, urllib.request
-
-          pat, owner, img, keep = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-          base = f"https://api.github.com/users/{owner}/packages/container/{img}/versions"
-          headers = {"Authorization": "Bearer " + pat, "Accept": "application/vnd.github+json"}
-          req = urllib.request.Request(base + "?per_page=100", headers=headers)
-          versions = json.load(urllib.request.urlopen(req, timeout=30))
-          to_delete = []
-          for v in versions:
-              id_ = v.get("id")
-              if not id_:
-                  continue
-              tags = (v.get("metadata") or {}).get("container", {}).get("tags") or []
-              if keep in tags:
-                  continue  # version we just pushed
-              if tags == ["latest"]:
-                  continue  # keep the newest latest marker
-              to_delete.append((id_, tags))
-          print("pruning:", [(i, t) for i, t in to_delete])
-          for id_, tags in to_delete:
-              url = base + "/" + str(id_)
-              rq = urllib.request.Request(url, headers=headers, method="DELETE")
-              try:
-                  code = urllib.request.urlopen(rq, timeout=30).status
-                  print("deleted", id_, tags, "->", code)
-              except Exception as e:
-                  print("skip", id_, tags, "err:", e)
-              time.sleep(0.4)
-          PY
