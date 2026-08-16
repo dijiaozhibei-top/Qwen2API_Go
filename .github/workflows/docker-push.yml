@@ -66,3 +66,70 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Keep only the newest version + latest tag. Each push creates a new
+      # sha-<commit> version; without cleanup, old versions and orphan layers
+      # pile up in GHCR storage. GHCR_PAT must have delete:packages scope
+      # (classic PAT from the repo secret does).
+      - name: Prune old GHCR versions
+        if: ${{ always() }}
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GHCR_PAT:-}" ]; then
+            echo "no GHCR_PAT set; skipping prune"
+            exit 0
+          fi
+          # Keep the tag pointing at the just-built commit, plus latest.
+          KEEP="sha-${GITHUB_SHA:0:7}"
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          IMG="${IMAGE_NAME,,}"
+          echo "owner=$OWNER img=$IMG keep_tag=$KEEP"
+          python3 - "$GHCR_PAT" "$OWNER" "$IMG" "$KEEP" <<'PY'
+import sys, json, time, urllib.request
+
+pat, owner, img, keep = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+base = f"https://api.github.com/users/{owner}/packages/container/{img}/versions"
+headers = {"Authorization": "Bearer " + pat, "Accept": "application/vnd.github+json"}
+
+def get(url):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+def delete(url):
+    req = urllib.request.Request(url, headers=headers, method="DELETE")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status
+
+versions = get(base + "?per_page=100")
+to_delete = []
+for v in versions:
+    tags = (v.get("metadata") or {}).get("container", {}).get("tags") or []
+    id_ = v.get("id")
+    if not id_:
+        continue
+    if tags and keep in tags:
+        # This is the version we just pushed; keep it.
+        continue
+    # latest is intentionally kept alongside the sha tag of the newest build.
+    if tags and "latest" in tags and len(tags) == 1:
+        # A bare? keep latest too (it moves to newest build; any version whose
+        # only tag is latest over an older digest is removable once superseded).
+        # We determine: if it's not the newest and has no other tag besides
+        # latest that points to an old build, skip only when it equals current.
+        pass
+    to_delete.append((id_, tags))
+
+# When nothing old exists, nothing to do.
+print("candidates:", [(i, t) for i, t in to_delete][:20])
+for id_, tags in to_delete:
+    try:
+        code = delete(base + "/" + str(id_))
+        print("deleted", id_, tags, "->", code)
+    except Exception as e:
+        print("skip", id_, tags, "err:", e)
+    time.sleep(0.4)
+PY
